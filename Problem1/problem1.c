@@ -72,7 +72,7 @@ unsigned int thread_runtimes[NUM_THREADS];
 // 1: Unclassified job (U)
 // 2: Secret job (S)
 // 3: Top Secret job (TS)
-enum LEVEL {U, S, TS, IDLE};
+typedef enum {U, S, TS, IDLE} level_t;
 LEVEL thread_levels[NUM_THREADS] = {U,U,U,U,U,U,U,U, TS,TS,TS,TS,TS,TS,TS,TS, S,S,S,S,S,S};
 boolean compatible(LEVEL A, LEVEL B){
 	return (A == IDLE || B == IDLE)

@@ -1,6 +1,7 @@
 # For project 3
 problem1
 problem2
+*.zip
 
 # Object files
 *.o
