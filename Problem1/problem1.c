@@ -3,18 +3,26 @@
 #include <stdlib.h>
 #include <sys/queue.h>
 #include <unistd.h>
+#include <time.h>
 
 // Helps to have booleans
 #define boolean unsigned short
 #define True 1
 #define False 0
 
+// also random numbers
+#define random_range(min, max) min+rand()%(max-min)
+
+// THREADS
 #define NUM_THREADS 20
 pthread_t threads[NUM_THREADS];
-#define MAX_THREAD_RUNTIME_MS 1000 
-#define MAX_THREAD_DELAYTIME_MS 3000
-unsigned int thread_runTimes[NUM_THREADS];
-unsigned int thread_delayTimes[NUM_THREADS];
+#define s_to_ms 1000000
+#define MIN_THREAD_RUNTIME_MS (unsigned long)(0.25f*s_to_ms)
+#define MAX_THREAD_RUNTIME_MS (unsigned long)(2*s_to_ms)
+#define MIN_THREAD_DELAYTIME_MS (unsigned long)(1*s_to_ms)
+#define MAX_THREAD_DELAYTIME_MS (unsigned long)(3*s_to_ms)
+unsigned long thread_runTimes[NUM_THREADS];
+unsigned long thread_delayTimes[NUM_THREADS];
 
 // THREAD SECURITY LEVELS
 // There are three security levels and corresponding security level numbers:
@@ -51,6 +59,8 @@ boolean compatible(level A, level B){
 // The security levels of the jobs running in each half of the cluster (half A and half B)
 level cluster_A_level = IDLE;
 level cluster_B_level = IDLE;
+
+// MUTEXES AND STATE VARIABLES
 pthread_mutex_t pthread_mutex_clusters;
 // The number of each level of jobs in the queue
 unsigned int num_U = 0; pthread_mutex_t pthread_mutex_num_U;
@@ -64,7 +74,7 @@ boolean pending_TS = False; pthread_mutex_t pthread_mutex_pending_TS;
 
 // THREAD QUEUES
 typedef unsigned int thread_id;
-#define QUEUE_CAPACITY NUM_THREADS+1
+#define QUEUE_CAPACITY NUM_THREADS // should never need more than NUM_THREADS
 typedef struct {
 	thread_id thread_ids[QUEUE_CAPACITY];//pthread_t* threads[NUM_THREADS];
 	unsigned int head; // index of the element that is the head of the queue
@@ -83,15 +93,19 @@ void normalize_queue_index(unsigned int* i){
 	}
 }
 void push_queue(pthread_queue* q, thread_id id){
+	unsigned int last_index = (q->tail > 0)? q->tail : QUEUE_CAPACITY-1; // if the tail is at index 0, then it's wrapping around from the end of the array. Fill the last elt in the array.
+	q->thread_ids[last_index] = id;
+	
 	q->tail++;
 	normalize_queue_index(&(q->tail));
-	q->thread_ids[q->tail] = id;
+	if (q->tail == q->head){
+		printf("WARNING: queue full: %d!\n", q->count);
+	}
+	
 	q->count++;
 	if (q->count > QUEUE_CAPACITY){
 		printf("ERROR: queue count exceeds number of threads!\n");
 		exit(1);
-	}else if (q->tail == q->head){
-		printf("WARNING: queue full: %d!\n", q->count);
 	}
 }
 thread_id pop_queue(pthread_queue* q){
@@ -102,10 +116,10 @@ thread_id pop_queue(pthread_queue* q){
 		printf("ERROR: popping from empty queue!\n");
 		exit(1);
 	}
-	if (q->tail == q->head){
-		printf("WARNING: queue empty: %d!\n", q->count);
-	}
 	q->count--;
+	if (q->tail == q->head){
+		printf("\tWARNING: queue empty: %d!\n", q->count);
+	}
 	return result;
 }
 boolean queue_empty(pthread_queue* q){
@@ -115,7 +129,7 @@ void print_pthread_queue(pthread_queue* q){
 	printf("Thread queue (head:%d, tail: %d):\n", q->head, q->tail);
 	unsigned int max = ((q->tail >= q->head)? q->tail-1 : QUEUE_CAPACITY-1);
 	for (int i=q->head;i<=max;i++){
-		printf("\tQueue index: %d\tThread ID:%d\tLevel:%s\trunTime: %d\tdelayTime: %d\n", i, q->thread_ids[i], str_level(thread_levels[q->thread_ids[i]]), thread_runTimes[q->thread_ids[i]], thread_delayTimes[q->thread_ids[i]]);
+		printf("\tQueue index: %d\tThread ID:%d\tLevel:%s\trunTime: %lu\tdelayTime: %lu\n", i, q->thread_ids[i], str_level(thread_levels[q->thread_ids[i]]), thread_runTimes[q->thread_ids[i]], thread_delayTimes[q->thread_ids[i]]);
 		
 		// if the queue circles around, have this loop also circle around
 		if (i == max && max != q->tail-1){
@@ -126,26 +140,20 @@ void print_pthread_queue(pthread_queue* q){
 	}
 }
 
-// THREAD PROCEDURES
-//void run_thread_job(){
-	//usleep((useconds_t)1);
-//}
-
 // A generalized security-level job
 #define thread_level thread_levels[thread_id]
-#define thread_runtime thread_runTimes[thread_id]
-#define thread_delattime thread_delayTimes[thread_id]
+#define thread_runTime thread_runTimes[thread_id]
+#define thread_delayTime thread_delayTimes[thread_id]
 void* pthread_job(void* id){
-
-	const long thread_id = (long)id;
-	//const level thread_level = thread_levels[id];
-	//const unsigned int thread_runtime = thread_runTimes[thread_id];
+	const long thread_id = (long)id; // our thread id was given to us directly disguised as a void* argument
 	
 	printf("Thread %lu here!\n", thread_id);
 	
 	// just for fun
-	printf("Popped %d from queue.\n", pop_queue(&A_queue));
+	printf("\tPopped %d from queue.\n", pop_queue(&A_queue));
 	
+	usleep(5000000);//thread_delayTime);
+	//sleep(thread_delayTime);
 /*		
 	level busy_cluster_level = IDLE;
 	level* idle_cluster = NULL;
@@ -227,8 +235,8 @@ int main(int argc, const char* argv[]){
 	
 	// Randomize the thread runtimes
 	for (int i=0;i<NUM_THREADS;i++){
-		thread_runTimes[i]=rand()%MAX_THREAD_RUNTIME_MS;
-		thread_delayTimes[i]=rand()%MAX_THREAD_DELAYTIME_MS;
+		thread_runTimes[i]=random_range(MIN_THREAD_RUNTIME_MS, MAX_THREAD_RUNTIME_MS);
+		thread_delayTimes[i]=random_range(MIN_THREAD_DELAYTIME_MS, MAX_THREAD_DELAYTIME_MS);
 	}
 	
 	// Create and run all our pthreads
