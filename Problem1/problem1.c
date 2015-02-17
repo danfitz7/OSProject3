@@ -141,19 +141,27 @@ void print_pthread_queue(pthread_queue* q){
 }
 
 // A generalized security-level job
-#define thread_level thread_levels[thread_id]
-#define thread_runTime thread_runTimes[thread_id]
-#define thread_delayTime thread_delayTimes[thread_id]
+#define thread_level thread_levels[this_id]
+#define thread_runTime thread_runTimes[this_id]
+#define thread_delayTime thread_delayTimes[this_id]
 void* pthread_job(void* id){
-	const long thread_id = (long)id; // our thread id was given to us directly disguised as a void* argument
+	const long this_id = (long)id; // our thread id was given to us directly disguised as a void* argument
 	
-	printf("Thread %lu here!\n", thread_id);
+	printf("Thread %lu here!\n", this_id);
 	
-	// just for fun
-	printf("\tPopped %d from queue.\n", pop_queue(&A_queue));
+	// just for fun  - stress test queues
+	for (int i=0;i<3;i++){
+		printf("\tT%lu popped %d from queue.\n", this_id, pop_queue(&A_queue));
 	
-	usleep(5000000);//thread_delayTime);
-	//sleep(thread_delayTime);
+		usleep(thread_delayTime);
+	
+		push_queue(&A_queue, (thread_id)this_id);
+		printf("\tT%lu pushed itself again.\n", this_id);
+	
+		usleep(thread_delayTime);
+	}
+	printf("\tT%lu popped %d from queue.\n", this_id, pop_queue(&A_queue));
+
 /*		
 	level busy_cluster_level = IDLE;
 	level* idle_cluster = NULL;
