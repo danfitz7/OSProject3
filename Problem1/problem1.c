@@ -272,13 +272,16 @@ thread_id get_next_thread_to_run(){
 		cur_queue_index = U;
 	}
 	
-	if ((cur_queue_index == S || cur_queue_index == TS) && (TS_queue.count + S_queue.count > 2* U_queue.count)){
+	// Compare the number f jobs in each security level queue. If there are too many of one compatibility type, switch to that type. 
+	if ((cur_queue_index == S || cur_queue_index == TS) && (U_queue.count > 2*(TS_queue.count + S_queue.count))){ // to many unclassified
 		pending_switchType = U;
-	}else if (cur_queue_index == U && (U_queue.count > 2 * (TS_queue.count + S_queue.count))){
+	}else if (cur_queue_index == U && ((TS_queue.count + S_queue.count) > U_queue.count)){ // too many secret
 		pending_switchType = S;
 	}		
 	
+	// If we are trying to switch type because too many of one compatibility type have piled up in their queue(s)...
 	if (pending_switchType != IDLE){
+		printf("Switching type when second cluster finished...\n");
 		cur_queue_index = pending_switchType;
 		pending_switchType=IDLE;
 		
