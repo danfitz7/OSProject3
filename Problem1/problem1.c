@@ -247,7 +247,7 @@ void run_thread_in_cluster(thread_id thread, cluster_index cluster){
 		pthread_mutex_unlock(&(thread_mutexes[thread]));// signal the thread to unlock
 }
 int cur_queue_index = 0;
-thread_id next_thread_to_run;
+cluster_index next_free_cluster = -1;
 thread_id get_next_thread_to_run(){
 	/*printf("Popping next thread to run from queue %d...\n", queue_index);
 	thread_id result = pop_queue(level_queues[queue_index]);
@@ -277,21 +277,22 @@ thread_id get_next_thread_to_run(){
 		pending_switchType = U;
 	}else if (cur_queue_index == U && ((TS_queue.count + S_queue.count) > U_queue.count)){ // too many secret
 		pending_switchType = S;
-	}		
+	}
 	
 	// If we are trying to switch type because too many of one compatibility type have piled up in their queue(s)...
 	if (pending_switchType != IDLE){
-		printf("Switching type when second cluster finished...\n");
+		printf("Switching type when second cluster finishes...\n");
 		cur_queue_index = pending_switchType;
 		pending_switchType=IDLE;
 		
 		// wait for jobs in both clusters to finish, don't start any new ones until they do.
-		get_next_available_cluster_index();
-		if ((pthread_mutex_trylock(&(thread_mutexes[cluster_jobs[A]])) == 0) && (pthread_mutex_trylock(&(thread_mutexes[cluster_jobs[B]])) == 0)){
-			run_thread_in_cluster(pop_queue(level_queues[cur_queue_index]), (1-next_thread_to_run)); // start a job in the most recently idle cluster. When get_next_thread_to_run returns, the main scheduler will start another job of the same type in the original idle cluster.
-		}else{
-			printf("ERROR: Last busy cluster signaled but one of the jobs is still locked.");
-		}
+		//get_next_available_cluster_index();
+		cluster_index remaining_cluster_index = 1-next_free_cluster;
+		pthread_mutex_lock(&(thread_mutexes[cluster_jobs[remaining_cluster_index]]));// == 0){
+		run_thread_in_cluster(pop_queue(level_queues[cur_queue_index]), remaining_cluster_index); // start a job in the most recently idle cluster. When get_next_thread_to_run returns, the main scheduler will start another job of the same type in the original idle cluster.
+		//}else{
+		//	printf("ERROR: Last busy cluster signaled but one of the jobs is still locked.");
+		//}
 	}
 	
 	return pop_queue(level_queues[cur_queue_index]);
@@ -299,13 +300,12 @@ thread_id get_next_thread_to_run(){
 void scheduler(){
 	printf("\nStarting Scheduler...\n");
 	
-	cluster_index next_free_cluster = -1;
 	while(1){
 		// wait for a job to finish in a cluster
 		next_free_cluster = get_next_available_cluster_index();
 		
 		// get the next job to run according to security logic
-		next_thread_to_run = get_next_thread_to_run();
+		thread_id next_thread_to_run = get_next_thread_to_run();
 		
 		// put the new job in the cluster
 		run_thread_in_cluster(next_thread_to_run, next_free_cluster);
