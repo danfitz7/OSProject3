@@ -1,61 +1,8 @@
 #include <pthread.h>
 #include <stdio.h>
-#include <random.h>
-
-/*
-When any job leaves a cluster half, we broadcast on the availability channel of the job running on the other cluster*
-
-We assume the pThreads scheduler under the hood is running every thread in pseudo-parallelism, unpredictably, but according to some specified protocol (Round-Robin).
-Our "virtual scheduling algorithm" arises from the threads checking when they can run their actual "government computation" (simulated by sleeping)
-
-Every thread waits in what amounts to a TryLock blocking loop until the conditions of the above global state variables allow it to run it's computation:
-
-TS_check_cluster(){
-	lock global variables
-	check  if either cluster is idle (no job)
-	flag success=0
-	if one is idle:
-		check compatibility with the job running in the other cluster (S, TS, or IDLE)
-		if compatible
-			set that clusters level to ours - we are going to be running in that cluster
-			if (num_TS==3){
-				pending_TS = TRUE
-			else if (pending_TS == TRUE){
-				pending_TS = FALSE
-			}
-			decrement the num_TS - one less TS process is waiting to run
-			success=1
-	unlock global variables
-	return success;
-}
-
-TS_run(){
-	while (!TS_check_cluster()
-
-	usleep()
-	
-	TS_exit()
-	
-	recycle()
-}
-
-TS_exit(){
-	lock global vars
-	set this cluster's level to IDLE
-	unlock global vars
-	broadcast on the security level of the job of the other processor*
-}
-	
-	
-The other thread levels operate similarly, but with different compatibilities.
-The S and U jobs must also check if num_TS>2, to let TS jobs run if there are more than 2 of them.
-
-*
-To ensure that TS and S jobs don't just keep swapping in and out we check if the number of U job in the queue is more then some threshold proportion larger than the number of T and TS jobs. 
-If it is, and there aren't more than 2 TS jobs waiting to run, then we don't broadcast when exiting, and when the job on the other cluster finishes, it broadcasts on the U level so that some U jobs can run.
-The reverse case happens for U jobs to allow T ans ST jobs to run.
-We don't have to worry about TS jobs waiting forever, since we've already built in mechanisms that force TS jobs to run when there are more than 2 of them.
-*/
+#include <stdlib.h>
+#include <sys/queue.h>
+#include <unistd.h>
 
 // Helps to have booleans
 #define boolean unsigned short
@@ -65,51 +12,144 @@ We don't have to worry about TS jobs waiting forever, since we've already built 
 #define NUM_THREADS 20
 pthread_t threads[NUM_THREADS];
 #define MAX_THREAD_RUNTIME_MS 1000 
-unsigned int thread_runtimes[NUM_THREADS];
+#define MAX_THREAD_DELAYTIME_MS 3000
+unsigned int thread_runTimes[NUM_THREADS];
+unsigned int thread_delayTimes[NUM_THREADS];
 
+// THREAD SECURITY LEVELS
 // There are three security levels and corresponding security level numbers:
 // 0: No job (IDLE)
 // 1: Unclassified job (U)
 // 2: Secret job (S)
 // 3: Top Secret job (TS)
-typedef enum {U, S, TS, IDLE} level_t;
-LEVEL thread_levels[NUM_THREADS] = {U,U,U,U,U,U,U,U, TS,TS,TS,TS,TS,TS,TS,TS, S,S,S,S,S,S};
-boolean compatible(LEVEL A, LEVEL B){
+typedef enum {U, S, TS, IDLE} level;
+char* str_level(level l){
+	switch(l){
+		case U:
+			return "U";
+			break;
+		case S:
+			return "S";
+			break;
+		case TS:
+			return "T";
+			break;
+		case IDLE:
+			return "I";
+			break;
+		default:
+			return "N";
+			break;
+	}
+}
+level thread_levels[NUM_THREADS] = {U,U,U,U,U,U,U,U,TS,TS,TS,TS,TS,TS,S,S,S,S,S,S};
+boolean compatible(level A, level B){
 	return (A == IDLE || B == IDLE)
 			|| ((A == S || A == TS) && (B == S || B == TS))
 			|| (A == U && B == U);
 }
-
 // The security levels of the jobs running in each half of the cluster (half A and half B)
-LEVEL cluster_A_level = IDLE; pthread_mutex_t pthread_mutex_cluster_A_level;
-LEVEL cluster_B_level = IDLE; pthread_mutex_t pthread_mutex_cluster_B_level;
-//LEVEL* cluster_levels[] = {IDLE, IDLE}/*{&clusterA_level, clusterB_level}*/; pthread_mutex_t pthread_mutex_cluster_levels;
-
-// The number of each LEVEL of jobs in the queue
+level cluster_A_level = IDLE;
+level cluster_B_level = IDLE;
+pthread_mutex_t pthread_mutex_clusters;
+// The number of each level of jobs in the queue
 unsigned int num_U = 0; pthread_mutex_t pthread_mutex_num_U;
 unsigned int num_S = 0; pthread_mutex_t pthread_mutex_num_S;
 unsigned int num_TS = 0; pthread_mutex_t pthread_mutex_num_TS;
-
 // Condition variables used for messaging (broadcasting) to jobs
 pthread_cond_t pthread_cond_available_U = PTHREAD_COND_INITIALIZER; // pthread_mutex_t pthread_mutex_available_U;
-pthread-cond_t pthread_cond_available_S = PTHREAD_COND_INITIALIZER; // pthread_mutex_t pthread_mutex_available_S;
-
-// Flag for sceduling two TS jobs in a row when there are only 3 in the wueue
+pthread_cond_t pthread_cond_available_S = PTHREAD_COND_INITIALIZER; // pthread_mutex_t pthread_mutex_available_S;
+// Flag for scheduling two TS jobs in a row when there are only 3 in the wueue
 boolean pending_TS = False; pthread_mutex_t pthread_mutex_pending_TS;
 
-void run_thread_job(){
-	usleep(1);
+// THREAD QUEUES
+typedef unsigned int thread_id;
+#define QUEUE_CAPACITY NUM_THREADS+1
+typedef struct {
+	thread_id thread_ids[QUEUE_CAPACITY];//pthread_t* threads[NUM_THREADS];
+	unsigned int head; // index of the element that is the head of the queue
+	unsigned int tail; // always the index circularly-after the last element in the queue. If this is equal to the head index, the queue is either full or empty
+	unsigned int count;// number of items in the queue
+} pthread_queue;
+pthread_queue A_queue = {.head=0, .tail=0, .count=0};
+pthread_queue B_queue = {.head=0, .tail=0, .count=0};
+// helper function to wrap around indexes in circular queue
+void normalize_queue_index(unsigned int* i){
+	while (*i >= QUEUE_CAPACITY){
+		*i = *i-QUEUE_CAPACITY;
+	}
+	while (*i < 0){
+		*i = *i+QUEUE_CAPACITY;
+	}
+}
+void push_queue(pthread_queue* q, thread_id id){
+	q->tail++;
+	normalize_queue_index(&(q->tail));
+	q->thread_ids[q->tail] = id;
+	q->count++;
+	if (q->count > QUEUE_CAPACITY){
+		printf("ERROR: queue count exceeds number of threads!\n");
+		exit(1);
+	}else if (q->tail == q->head){
+		printf("WARNING: queue full: %d!\n", q->count);
+	}
+}
+thread_id pop_queue(pthread_queue* q){
+	thread_id result = q->thread_ids[q->head];
+	q->head++;
+	normalize_queue_index(&(q->head));
+	if (q->count == 0){
+		printf("ERROR: popping from empty queue!\n");
+		exit(1);
+	}
+	if (q->tail == q->head){
+		printf("WARNING: queue empty: %d!\n", q->count);
+	}
+	q->count--;
+	return result;
+}
+boolean queue_empty(pthread_queue* q){
+	return (q->count == 0);
+}
+void print_pthread_queue(pthread_queue* q){
+	printf("Thread queue (head:%d, tail: %d):\n", q->head, q->tail);
+	unsigned int max = ((q->tail >= q->head)? q->tail-1 : QUEUE_CAPACITY-1);
+	for (int i=q->head;i<=max;i++){
+		printf("\tQueue index: %d\tThread ID:%d\tLevel:%s\trunTime: %d\tdelayTime: %d\n", i, q->thread_ids[i], str_level(thread_levels[q->thread_ids[i]]), thread_runTimes[q->thread_ids[i]], thread_delayTimes[q->thread_ids[i]]);
+		
+		// if the queue circles around, have this loop also circle around
+		if (i == max && max != q->tail-1){
+			i=0;
+			max = q->tail;
+			printf("Circling to front of queue array.");
+		}
+	}
 }
 
+// THREAD PROCEDURES
+//void run_thread_job(){
+	//usleep((useconds_t)1);
+//}
+
 // A generalized security-level job
+#define thread_level thread_levels[thread_id]
+#define thread_runtime thread_runTimes[thread_id]
+#define thread_delattime thread_delayTimes[thread_id]
 void* pthread_job(void* id){
-	const long thread_id = (long)thread_id;
-	const LEVEL thread_level = thread_levels[id];
-	const unsigned int thread_runtime = thread_runtimes[thread_id];
+
+	const long thread_id = (long)id;
+	//const level thread_level = thread_levels[id];
+	//const unsigned int thread_runtime = thread_runTimes[thread_id];
 	
-	LEVEL busy_cluster_level = IDLE;
-	LEVEL* idle_cluster = NULL;
-	pthread_mutex_lock(pthread_mutex_cluster_levels);
+	printf("Thread %lu here!\n", thread_id);
+	
+	// just for fun
+	printf("Popped %d from queue.\n", pop_queue(&A_queue));
+	
+/*		
+	level busy_cluster_level = IDLE;
+	level* idle_cluster = NULL;
+	pthread_mutex_lock(&pthread_mutex_clusters);
 		
 		// get the next idle cluster and the security level of the busy cluster
 		while (idle_cluster == NULL){
@@ -123,7 +163,7 @@ void* pthread_job(void* id){
 		}
 		
 		// check security compatibility with the job running on the busy cluster
-		if (compatible(thread_level, busy_cluster_level){
+		if (compatible(thread_level, busy_cluster_level)){
 			// we are going into this cluster
 			*idle_cluster = thread_level;
 
@@ -149,20 +189,24 @@ void* pthread_job(void* id){
 			run_thread_job();
 		}
 		
-	pthread_mutex_unlock(&pthread_mutex_cluster_levels);	
+	pthread_mutex_unlock(&pthread_mutex_clusters);	
+	*/
+	return (void*)0;
 }
+
+void* (*thread_procedures[3])(void*) = {pthread_job, pthread_job, pthread_job}; // array of thread procedures corresponding to security levels
 
 void setup(){
 	// init Mutexes
-	pthread_mutex_destroy(&pthread_mutex_cluster_levels, NULL);
-	pthread_mutex_destroy(&pthread_mutex_num_U, NULL);
-	pthread_mutex_destroy(&pthread_mutex_num_S, NULL);
-	pthread_mutex_destroy(&pthread_mutex_num_TS, NULL);
-	pthread_mutex_destroy(&pthread_mutex_pending_TS, NULL);
+	pthread_mutex_init(&pthread_mutex_clusters, NULL);
+	pthread_mutex_init(&pthread_mutex_num_U, NULL);
+	pthread_mutex_init(&pthread_mutex_num_S, NULL);
+	pthread_mutex_init(&pthread_mutex_num_TS, NULL);
+	pthread_mutex_init(&pthread_mutex_pending_TS, NULL);
 	
 	// init Condition Variables
-	pthread_cond_destroy(&pthread_cond_available_U, NULL);
-	pthread_cond_destroy(&pthread_cond_available_S, NULL);
+	pthread_cond_init(&pthread_cond_available_U, NULL);
+	pthread_cond_init(&pthread_cond_available_S, NULL);
 }
 
 void teardown(){
@@ -171,29 +215,33 @@ void teardown(){
 	pthread_cond_destroy(&pthread_cond_available_S);
 	
 	// destroy Mutexes
-	pthread_mutex_destroy(&pthread_mutex_cluster_levels, NULL);
-	pthread_mutex_destroy(&pthread_mutex_num_U, NULL);
-	pthread_mutex_destroy(&pthread_mutex_num_S, NULL);
-	pthread_mutex_destroy(&pthread_mutex_num_TS, NULL);
-	pthread_mutex_destroy(&pthread_mutex_pending_TS, NULL);
+	pthread_mutex_destroy(&pthread_mutex_clusters);
+	pthread_mutex_destroy(&pthread_mutex_num_U);
+	pthread_mutex_destroy(&pthread_mutex_num_S);
+	pthread_mutex_destroy(&pthread_mutex_num_TS);
+	pthread_mutex_destroy(&pthread_mutex_pending_TS);
 }
 
 int main(int argc, const char* argv[]){
 	setup();
 	
 	// Randomize the thread runtimes
-	for (int i=0;i<NUM_THREADS;i++{
-		thread_runtimes[i]=rand()%MAX_THREAD_RUNTIME_MS;
+	for (int i=0;i<NUM_THREADS;i++){
+		thread_runTimes[i]=rand()%MAX_THREAD_RUNTIME_MS;
+		thread_delayTimes[i]=rand()%MAX_THREAD_DELAYTIME_MS;
 	}
 	
 	// Create and run all our pthreads
 	// https://computing.llnl.gov/tutorials/pthreads/#Example
 	int pthread_create_return_code;
 	for (long t=0;t<NUM_THREADS;t++){
-		pthread_create_return_code = pthread_create(&threads[t], NULL, thread_procedure[thread_levels[i]], (void*)t)
-		if (rc){
-			printf(""ERROR; return code from pthread_create is %d\n", pthread_create_return_code);
+		printf("\nMaking thread %lu\n", t);
+		pthread_create_return_code = pthread_create(&threads[t], NULL, thread_procedures[thread_levels[t]], (void*)t);
+		if (pthread_create_return_code){
+			printf("ERROR; return code from pthread_create is %d\n", pthread_create_return_code);
 		}
+		push_queue(&A_queue, (thread_id)t);
+		print_pthread_queue(&A_queue);
 	}
 	
 	teardown();

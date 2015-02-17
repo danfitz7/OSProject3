@@ -2,8 +2,8 @@
 all: problem1.o
 	gcc -std=c99 -pthread -o problem1 problem1.o -I.
 
-#problem1.o: problem1.c
-#	gcc -std=c99 -Wall -g -c problem1.c -I.
+problem1.o: problem1.c
+	gcc -std=c99 -Wall -g -c problem1.c -I.
 
 clean:
 	rm *.o problem1
