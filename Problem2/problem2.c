@@ -14,11 +14,11 @@
 #define random_range(min, max) min+rand()%(max-min)
 
 // TURNS
-typedef enum {LEFT, RIGHT, STRAIGHT} turn_t;
-turn_t random_turn(){
-	return (turn_t)(rand()%2);
+typedef enum {LEFT=0, RIGHT=1, STRAIGHT=2} turn_direction;
+turn_direction random_turn(){
+	return (turn_direction)(rand()%2);
 }
-char* str_turn(turn_t t){
+char* str_turn(turn_direction t){
 	switch(t){
 		case LEFT:
 			return "L";
@@ -36,8 +36,8 @@ char* str_turn(turn_t t){
 }
 
 // DIRECTIONS
-typedef enum {NORTH, SOUTH, EAST, WEST} direction_t;
-direction_t random_direction(){
+typedef enum {NORTH=0, SOUTH=1, EAST=2, WEST=3} approach_direction;
+approach_direction random_direction(){
 	return (direction_t)(rand()%3);
 }
 char* str_direction(direction_t d){
@@ -60,23 +60,36 @@ char* str_direction(direction_t d){
 	}
 }
 
+// TIME
+typedef unsigned long time_ms;
+#define s_2_ms 1000000
+#define MIN_RECYCLE_TIME 1*s_2_ms
+#define MAX_RECYCLE_TIME 5*s_2_ms
+time_ms random_time(){
+	return (time_ms)(MIN_RECYCLE_TIME + rand()%(MAX_RECYCLE_TIME-MIN_RECYCLE_TIME));
+}
+
 // CARS
 #define NUM_CARS 20
 typedef unsigned short car_id;
 typedef struct{
 	direction_t direction;
 	turn_t turn;
+	time_ms recycle_time;
+	pthread thread;
+	pthread_mutex_t mutex;
 } car;
 car cars[NUM_CARS];	// master array of cars
+void recycle(car* c){
+	c.turn = random_turn();
+	c.direction = random_direction();
+	c.recycle_time = random_time();
+}
 void print_car(car_id car){
 	printf("C%2d coming from %s turning %s\n", car, str_direction(cars[car].direction), str_turn(cars[car].turn));
 }
 
-// ROAD LOGIC
-
-
-
-// DEFINE QUEUES
+// QUEUES
 typedef unsigned int queue_index;
 #define QUEUE_CAPACITY NUM_CARS // should never need more than NUM_CARS
 typedef struct {
@@ -143,6 +156,27 @@ void print_car_queue(car_queue* q){
 	}
 }
 
+// INTERSECTION QUEUES
+car_queue approaching_queues[4]; // Cars line up on the roads to our intersection from the cardinal directions
+emergency_vehicle_queues[4];	 // emergency vehicles line up in these special queues (representative of bypassing every car in the corresponding regular car queue)
+
+// CAR LOGIC
+#define this cars[id]
+void enqueue(car_id id){
+	push_queue(&(approaching_queus[cars[id].direction]), id);
+	pthread_mutex_lock(cars[id].mutex);
+}
+// main can thread code
+void* car_procedure(void* void_id){
+	const car_id id = (car_id)void_id;
+	
+	while(1){
+		usleep(this.delay_time); // sleep a bit
+		enqueue(id);			 // enqueue ourselves
+		pthread_mutex_lock(this.mutex);	 // wait for the scheduler to unlock us based on where we're going
+	}
+}
+
 void setup(){
 	/*// init Mutexes
 	pthread_mutex_init(&pthread_mutex_clusters_lock, NULL);
@@ -179,14 +213,25 @@ int main(int argc, const char* argv[]){
 	setup();
 	
 	// Randomize the car directions
-	for (int i=0;i<NUM_CARS;i++){
-		cars[i].turn=random_turn();
-		cars[i].direction=random_direction();
+	for (car_id c=0;c<NUM_CARS;c++){
+		printf("\nMaking car %d\n", c);
+		recycle(&(cars[c])); 	// init the car
+		pthread_create_return_code = pthread_create(&(cars[c].thread), NULL, car_thread, (void*)c);
+		if (pthread_create_return_code){
+			printf("ERROR; Return code from pthread_create is %d\n", pthread_create_return_code);
+		}
 	}
 	
-	
+	int pthread_create_return_code;
+	for (long t=0;t<NUM_THREADS;t++){
+		printf("\nMaking thread %lu\n", t);
+		pthread_create_return_code = pthread_create(&threads[t], NULL, thread_procedures[thread_levels[t]], (void*)t);
+		if (pthread_create_return_code){
+			printf("ERROR; return code from pthread_create is %d\n", pthread_create_return_code);
+		}
+	}
 	
 	teardown();
 
-	//pthread_exit(NULL);
+	pthread_exit(NULL);
 }
