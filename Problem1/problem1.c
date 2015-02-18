@@ -126,6 +126,21 @@ void print_pthread_queue(pthread_queue* q){
 		}
 	}
 }
+void print_queue_rows(pthread_queue* q){
+	unsigned int max = ((q->tail >= q->head)? q->tail-1 : QUEUE_CAPACITY-1);
+	for (int i=q->head;i<=max;i++){
+		printf("\t%2lu", q->thread_ids[i]);
+		
+		// if the queue circles around, have this loop also circle around
+		if (i == max && max != q->tail-1){
+			i=0;
+			max = q->tail;
+			printf("Circling to front of queue array.");
+		}
+	}
+	printf("\n");
+}
+
 
 // THREAD QUEUES
 pthread_queue S_queue = {.head=0, .tail=0, .count=0}; // queue of Secret jobs
@@ -147,9 +162,14 @@ thread_id cluster_jobs[2];						// the ids of the threads currently in each clus
 //cluster_activity current_clusters = 0;			// code for the status of both clusters (4 states), locked by pthread_mutex_clusters_lock
 //pthread_cond_t pthread_cond_cluster_available; 	// signalled when one of the clusters becomes available
 void print_clusters(){
-	printf("\nA[%2lu](%s)\nB[%2lu](%s)\n", cluster_jobs[A], str_level(thread_levels[cluster_jobs[A]]),cluster_jobs[B], str_level(thread_levels[cluster_jobs[B]]));
+	//pthread_mutex_lock(&pthread_mutex_clusters_lock);
+	printf("\nA[%2lu](%s) B[%2lu](%s)\n", cluster_jobs[A], str_level(thread_levels[cluster_jobs[A]]),cluster_jobs[B], str_level(thread_levels[cluster_jobs[B]]));
+	//pthread_mutex_unlock(&pthread_mutex_clusters_lock);
+	
+	print_queue_rows(&U_queue);
+	print_queue_rows(&S_queue);
+	print_queue_rows(&TS_queue);
 }
-
 
 // A generalized security-level job
 #define thread_level thread_levels[this_id]
@@ -252,9 +272,14 @@ cluster_index get_next_available_cluster_index(){
 	printf("ERROR: A cluster was freed but neither process is unlocked!\n");
 	return -1;
 }
+void set_cluster(unsigned int i, thread_id id){
+	pthread_mutex_lock(&pthread_mutex_clusters_lock);
+	cluster_jobs[i] = id;					// remember that this thread is running in this thread
+	pthread_mutex_unlock(&pthread_mutex_clusters_lock);
+}
 void run_thread_in_cluster(thread_id thread, cluster_index cluster){
 		printf("\tRunning thread %lu (%s) in cluster %d...\n", thread, str_level(thread_levels[thread]), cluster);
-		cluster_jobs[cluster] = thread;					// remember that this thread is running in this thread
+		set_cluster(cluster, thread);
 		pthread_mutex_unlock(&(thread_mutexes[thread]));// signal the thread to run by unlocking the mutex its waiting on
 }
 
@@ -269,7 +294,7 @@ thread_id get_next_thread_to_run(){
 	// if there are more then 3 TS jobs in the TS queue, we must run at-least two of them immediately.
 	// Run one now because there are 3 or more 3 TS jobs, and set the pending_TS flag so we run one next time as well.
 	if (TS_queue.count >=3 || pending_TS==True){
-		printf("\t\tMore than 3 TS jobs or pending TS\n")
+		printf("\t\tMore than 3 TS jobs or pending TS\n");
 		if (pending_TS){		// if we're here because the flag was set
 			pending_TS = False; // unset the flag
 		}else if (TS_queue.count == 3){ // if the count was exactly three (it will be two after we pop this thread)
