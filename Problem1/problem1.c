@@ -4,11 +4,31 @@
 #include <sys/queue.h>
 #include <unistd.h>
 #include <time.h>
+#include <semaphore.h>
 
 // Helps to have booleans
 #define boolean unsigned short
 #define True 1
 #define False 0
+
+// Semaphores as mutex-like locks (binary semaphores).
+// "semutex" is a stand-in replacement everywhere for "pthread_mutex"
+typedef sem_t semutex_t;
+void semutex_init(semutex_t* semutex, boolean locked){
+	sem_init(semutex, 0, (locked?0:1)); // 1 = locked, 0 = unlocked. see FIGURE: A SEMAPHORE AS A LOCK in http://pages.cs.wisc.edu/~remzi/Classes/537/Fall2008/Notes/threads-semaphores.txt
+}
+void semutex_destroy(semutex_t* semutex){
+	sem_destroy(semutex);
+}
+void semutex_lock(semutex_t* semutex){
+	sem_wait(semutex);
+}
+void semutex_unlock(semutex_t* semutex){
+	sem_post(semutex);
+}
+int semutex_trylock(semutex_t* semutex){
+	return sem_trywait(semutex);
+}
 
 // also random numbers
 #define random_range(min, max) min+rand()%(max-min)
@@ -16,8 +36,8 @@
 // THREADS
 #define NUM_THREADS 20
 pthread_t threads[NUM_THREADS];					// global master array of threads
-//pthread_cond_t thread_conditions[NUM_THREADS]; 	// a condition variable (mutex) for every boy and girl and thread
-pthread_mutex_t thread_mutexes[NUM_THREADS]; 	// a mutex for every thread
+//pthread_cond_t thread_conditions[NUM_THREADS];// a condition variable (mutex) for every boy and girl and thread
+semutex_t thread_mutexes[NUM_THREADS]; 	// a mutex for every thread
 
 // TIMING
 #define s_to_ms 1000000
@@ -147,7 +167,7 @@ pthread_queue S_queue = {.head=0, .tail=0, .count=0}; // queue of Secret jobs
 pthread_queue TS_queue = {.head=0, .tail=0, .count=0};// queue of Top-Secret jobs
 pthread_queue U_queue = {.head=0, .tail=0, .count=0}; // queue of Unclassified jobs
 pthread_queue* level_queues[3] = {&U_queue, &S_queue, &TS_queue};
-pthread_mutex_t pthread_mutex_level_queues[3];
+semutex_t level_queues_mutex[3];
 // flags
 boolean pending_TS = False;
 level pending_switchType = IDLE;
@@ -157,14 +177,14 @@ typedef short cluster_index;
 typedef enum {A=0, B=1, AB = 2, NONE = 3} cluster_activity;
 //#define A (cluster_index)0
 //#define B (cluster_index)1
-pthread_mutex_t pthread_mutex_clusters_lock; 	// locks the state of cluster_jobs
+semutex_t cluster_lock_mutex; 	// locks the state of cluster_jobs
 thread_id cluster_jobs[2];						// the ids of the threads currently in each cluster
-//cluster_activity current_clusters = 0;			// code for the status of both clusters (4 states), locked by pthread_mutex_clusters_lock
+//cluster_activity current_clusters = 0;			// code for the status of both clusters (4 states), locked by cluster_lock_mutex
 //pthread_cond_t pthread_cond_cluster_available; 	// signalled when one of the clusters becomes available
 void print_clusters(){
-	//pthread_mutex_lock(&pthread_mutex_clusters_lock);
+	//semutex_lock(&cluster_lock_mutex);
 	printf("\nA[%2lu](%s) B[%2lu](%s)\n", cluster_jobs[A], str_level(thread_levels[cluster_jobs[A]]),cluster_jobs[B], str_level(thread_levels[cluster_jobs[B]]));
-	//pthread_mutex_unlock(&pthread_mutex_clusters_lock);
+	//semutex_unlock(&cluster_lock_mutex);
 	
 	print_queue_rows(&U_queue);
 	print_queue_rows(&S_queue);
@@ -177,21 +197,22 @@ void print_clusters(){
 #define thread_delayTime thread_delayTimes[this_id]
 void push_thyself(thread_id this_id){
 	printf("\tT%2lu(%s)\tPushing to queue for level %d...\n", this_id, str_level(thread_level), thread_level);
-	pthread_mutex_lock(&pthread_mutex_level_queues[thread_level]);
+	semutex_lock(&level_queues_mutex[thread_level]);
 	push_queue(level_queues[thread_level], this_id);
-	pthread_mutex_unlock(&pthread_mutex_level_queues[thread_level]);
+	semutex_unlock(&level_queues_mutex[thread_level]);
 }
 void wait_for_cluster(thread_id this_id){
 	printf("\tT%2lu(%s)\tWaiting for cluster...\n", this_id, str_level(thread_level));
-	pthread_mutex_lock(&(thread_mutexes[this_id]));
+	semutex_lock(&(thread_mutexes[this_id]));
 		//pthread_cond_wait(&(thread_conditions[this_id]), &(thread_mutexes[this_id]));		// block while waiting for a cluster. thread_mutexes[this_id] is unlocked while we block.
 		// NOTE: thread_mutexes[this_id] is now locked.
+	semutex_trylock(&cluster_lock_mutex);	// make sure someone has blocked this so the scheduler can detect it's unblocking
 	printf("\tT%2lu(%s)\tRunning in cluster...\n", this_id, str_level(thread_level));
 }
 void exit_cluster(thread_id this_id){
 	printf("\tT%2lu(%s)\tExiting cluster...\n", this_id, str_level(thread_level));
-	pthread_mutex_unlock(&(thread_mutexes[this_id]));		// unlock our own mutex
-	pthread_mutex_unlock(&pthread_mutex_clusters_lock);		// unlock the cluster lock which the scheduler is blocking on to see when a cluster becomes free
+	semutex_unlock(&(thread_mutexes[this_id]));		// unlock our own mutex
+	semutex_unlock(&cluster_lock_mutex);		// unlock the cluster lock which the scheduler is blocking on to see when a cluster becomes free
 	//pthread_cond_signal(&pthread_cond_cluster_available);	// signal the scheduler that we've finished running
 }
 void* pthread_job(void* id){
@@ -209,20 +230,6 @@ void* pthread_job(void* id){
 		push_thyself(this_id);		// push ourselves again
 	}
 	
-	/*// just for fun  - stress test queues
-	for (int i=0;i<3;i++){
-		printf("\tT%lu popped %d from queue.\n", this_id, pop_queue(&A_queue));
-	
-		usleep(thread_delayTime);
-	
-		push_queue(&A_queue, (thread_id)this_id);
-		printf("\tT%lu pushed itself again.\n", this_id);
-	
-		usleep(thread_delayTime);
-	}
-	printf("\tT%lu popped %d from queue.\n", this_id, pop_queue(&A_queue));
-	*/
-
 	return (void*)0; // stop complaining
 }
 
@@ -230,13 +237,13 @@ void* (*thread_procedures[3])(void*) = {pthread_job, pthread_job, pthread_job}; 
 
 void setup(){
 	// init Mutexes
-	pthread_mutex_init(&pthread_mutex_clusters_lock, NULL);
+	semutex_init(&cluster_lock_mutex, False);
 	for (int i=0;i<3;i++){
-		pthread_mutex_init(&(pthread_mutex_level_queues[i]), NULL);
+		semutex_init(&(level_queues_mutex[i]), False);
 	}
 	for (int i=0;i<NUM_THREADS;i++){
-		pthread_mutex_init(&(thread_mutexes[i]), NULL);
-		pthread_mutex_lock(&(thread_mutexes[i]));
+		semutex_init(&(thread_mutexes[i]), True);	// lock all threads as they're made so they immediately block on their own mutex
+		//semutex_lock(&(thread_mutexes[i]));			
 	}
 	
 	// init Condition Variables
@@ -248,39 +255,43 @@ void teardown(){
 	//pthread_cond_destroy(&pthread_cond_cluster_available);
 	
 	// destroy Mutexes
-	pthread_mutex_destroy(&pthread_mutex_clusters_lock);
+	semutex_destroy(&cluster_lock_mutex);
 	for (int i=0;i<3;i++){
-		pthread_mutex_destroy(&(pthread_mutex_level_queues[i]));
+		semutex_destroy(&(level_queues_mutex[i]));
 	}
 	for (int i=0;i<NUM_THREADS;i++){
-		pthread_mutex_destroy(&(thread_mutexes[i]));
+		semutex_destroy(&(thread_mutexes[i]));
 	}
 }
 
 cluster_index get_next_available_cluster_index(){
 	printf("\tWaiting for next idle cluster...\n");
-	pthread_mutex_lock(&pthread_mutex_clusters_lock); // block waiting for one of the two running processes to unlock this mutex
-	//pthread_cond_wait(&pthread_cond_cluster_available, &pthread_mutex_clusters_lock); // wait for some thread signal that a cluster is open
+	semutex_lock(&cluster_lock_mutex); // block waiting for one of the two running processes to unlock this mutex
+	//pthread_cond_wait(&pthread_cond_cluster_available, &cluster_lock_mutex); // wait for some thread signal that a cluster is open
+	
+	int A_trylock = semutex_trylock(&(thread_mutexes[cluster_jobs[A]]));
+	int B_trylock = semutex_trylock(&(thread_mutexes[cluster_jobs[B]]));
+	semutex_unlock(&cluster_lock_mutex);							// unlock so next running thread can lock	
 	
 	// which one unlocked?
-	if (pthread_mutex_trylock(&(thread_mutexes[cluster_jobs[A]])) == 0){
+	if (A_trylock == 0){
 		return A;
 	}
-	if (pthread_mutex_trylock(&(thread_mutexes[cluster_jobs[B]])) == 0){
+	if (B_trylock == 0){
 		return B;
 	}
 	printf("ERROR: A cluster was freed but neither process is unlocked!\n");
 	return -1;
 }
 void set_cluster(unsigned int i, thread_id id){
-	pthread_mutex_lock(&pthread_mutex_clusters_lock);
+	semutex_lock(&cluster_lock_mutex);
 	cluster_jobs[i] = id;					// remember that this thread is running in this thread
-	pthread_mutex_unlock(&pthread_mutex_clusters_lock);
+	semutex_unlock(&cluster_lock_mutex);
 }
 void run_thread_in_cluster(thread_id thread, cluster_index cluster){
 		printf("\tRunning thread %lu (%s) in cluster %d...\n", thread, str_level(thread_levels[thread]), cluster);
 		set_cluster(cluster, thread);
-		pthread_mutex_unlock(&(thread_mutexes[thread]));// signal the thread to run by unlocking the mutex its waiting on
+		semutex_unlock(&(thread_mutexes[thread]));// signal the thread to run by unlocking the mutex its waiting on
 }
 
 int cur_queue_index = U;				// index of the queue being popped to get the next thread to run
@@ -354,7 +365,7 @@ thread_id get_next_thread_to_run(){
 		cluster_index remaining_cluster_index = 1-next_free_cluster; // get the index of the clustert that's still busy (not idle)
 		thread_id other_cluster_tread_id = cluster_jobs[remaining_cluster_index];
 		printf("Switching type when job %lu in cluster %d finishes...\n", cluster_jobs[remaining_cluster_index], remaining_cluster_index);
-		pthread_mutex_lock(&(thread_mutexes[other_cluster_tread_id]));								// wait for that cluster to become idle
+		semutex_lock(&(thread_mutexes[other_cluster_tread_id]));								// wait for that cluster to become idle
 		run_thread_in_cluster(pop_queue(level_queues[cur_queue_index]), remaining_cluster_index); 	// start a job in the most recently idle cluster. When get_next_thread_to_run returns, the main scheduler will start another job of the same type in the original idle cluster.
 	}
 	
@@ -398,7 +409,7 @@ int main(int argc, const char* argv[]){
 	}
 	
 	// run the first two threads
-	pthread_mutex_lock(&pthread_mutex_clusters_lock);
+	semutex_lock(&cluster_lock_mutex);
 	run_thread_in_cluster(get_next_thread_to_run(), A);	
 	run_thread_in_cluster(get_next_thread_to_run(), B);
 	
