@@ -10,6 +10,25 @@
 #define True 1
 #define False 0
 
+// Semaphores as mutex-like locks (binary semaphores).
+// "semutex" is a stand-in replacement everywhere for "pthread_mutex"
+typedef sem_t semutex_t;
+void semutex_init(semutex_t* semutex, boolean locked){
+	sem_init(semutex, 0, (locked?0:1)); // 1 = locked, 0 = unlocked. see FIGURE: A SEMAPHORE AS A LOCK in http://pages.cs.wisc.edu/~remzi/Classes/537/Fall2008/Notes/threads-semaphores.txt
+}
+void semutex_destroy(semutex_t* semutex){
+	sem_destroy(semutex);
+}
+void semutex_lock(semutex_t* semutex){
+	sem_wait(semutex);
+}
+void semutex_unlock(semutex_t* semutex){
+	sem_post(semutex);
+}
+int semutex_trylock(semutex_t* semutex){
+	return sem_trywait(semutex);
+}
+
 // also random numbers
 #define random_range(min, max) min+rand()%(max-min)
 
