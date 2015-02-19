@@ -4,6 +4,7 @@
 #include <sys/queue.h>
 #include <unistd.h>
 #include <time.h>
+#include <semaphore.h>
 
 // Helps to have booleans
 #define boolean unsigned short
@@ -82,8 +83,9 @@ char* str_direction(approach_direction d){
 // TIME
 typedef unsigned int time_ms;
 #define s_2_ms 1000000
-#define MIN_SPEED_TIME 0.25*s_2_ms
-#define MAX_SPEED_TIME 2*s_2_ms
+//#define MIN_SPEED_TIME 0.25*s_2_ms
+//#define MAX_SPEED_TIME 2*s_2_ms
+#define INTERSECTION_CROSS_TIME 1*s_2_ms
 #define MIN_RECYCLE_TIME 2*s_2_ms
 #define MAX_RECYCLE_TIME 5*s_2_ms
 time_ms random_time(unsigned int min, unsigned int max){
@@ -92,27 +94,60 @@ time_ms random_time(unsigned int min, unsigned int max){
 time_ms random_recycle_time(){
 	return random_time(MIN_RECYCLE_TIME, MAX_RECYCLE_TIME);
 }
-time_ms random_speed_time(){
+/*time_ms random_speed_time(){
 	return random_time(MIN_SPEED_TIME, MAX_SPEED_TIME-MIN_SPEED_TIME);
-}
+}*/
 
 // QUADRANTS
-pthread_mutex_t intersection_lock_mutex;
+semutex_t intersection_lock_mutex;
 typedef enum {NE=0, SE=1, SW=2, NW=3, UNUSED} quadrant_t;
 typedef enum {OCCUPIED, UNOCCUPIED} quadrant_state_t;
 quadrant_state_t quadrant_states[4];
+char* str_quadrant(approach_direction d){
+	switch(d){
+		case NE:
+			return "NE";
+			break;
+		case SE:
+			return "SE";
+			break;
+		case SW:
+			return "SW";
+			break;
+		case NW:
+			return "NW";
+			break;
+		default:
+			return "??";
+			break;
+	}
+}
+
+quadrant_t rotated_quadrant(quadrant_t quad, int n){
+	if (quad==UNUSED){
+		return UNUSED;
+	}
+	for (int i=0;i<n;i++){			// rotate this many times
+		quad++;
+		if (quad>=4){
+			quad=0;
+		}
+	}
+	return quad;
+}
 
 // rotate a three-element array of quadrants this many times (all rotations clockwise)
 void rotate_quadrants(quadrant_t quads[], int n){
 	for (int i=0;i<n;i++){			// rotate this many times
 		for (int q=0;q<3;q++){		// loop through each required quad
-			if (quads[q] != UNUSED){	// if the quad is NULL (not required), we don't care
+			quads[q] = rotated_quadrant(quads[q], n);
+			/*if (quads[q] != UNUSED){	// if that number quad is not used, we don't care
 				// circularly rotate
 				quads[q]++;
-				if (quads[q] >= 4){
-					quads[q] = 0;
+				while(quads[q] >= 4){
+					quads[q]-=4;
 				}
-			}
+			}*/
 		}
 	}
 }
@@ -126,31 +161,34 @@ void get_quadrant_list(quadrant_t quads[4], approach_direction dir, turn_directi
 	rotate_quadrants(quads, dir);
 }
 
-
 // CARS
 #define NUM_CARS 20
-typedef unsigned int car_id;
+typedef int car_id;
+typedef enum {REGULAR, EMERGENCY, MOTORCADE} car_type_t;
 typedef struct{
 	approach_direction direction;
 	turn_direction turn;
 	time_ms recycle_time;
-	time_ms speed_time;
-
+//	time_ms speed_time;
+	car_type_t type;
 	quadrant_t required_quadrants[3];
 	pthread_t thread;
-	pthread_mutex_t mutex;
-	pthread_cond_t greenlight;
+	car_id id;
+	semutex_t mutex;
+//	pthread_cond_t greenlight;
 } car;
 car cars[NUM_CARS];	// master array of cars
-void recycle(car* c){
-	c->turn = random_turn();
-	c->direction = random_direction();
-	c->recycle_time = random_recycle_time();
-	c->speed_time = random_speed_time();
-	get_quadrant_list(c->required_quadrants, c->direction, c->turn);
+void recycle(car_id id){
+	printf("\tCar %d is recycling\n", id);
+	cars[id].turn = random_turn();
+	cars[id].direction = random_direction();
+	cars[id].recycle_time = random_recycle_time();
+	cars[id].type = REGULAR; // TODO: make emergency vehcles
+	//cars[id].speed_time = random_speed_time();
+	get_quadrant_list(cars[id].required_quadrants, cars[id].direction, cars[id].turn);
 }
 void print_car(car_id car){
-	printf("C%2d coming from %s turning %s\n", car, str_direction(cars[car].direction), str_turn(cars[car].turn));
+	printf("%s%2d coming from %s turning %s", ((cars[car].type==REGULAR)?"C":"E"), car, str_direction(cars[car].direction), str_turn(cars[car].turn));
 }
 
 // QUEUES
@@ -201,6 +239,13 @@ car_id pop_queue(car_queue* q){
 	}
 	return result;
 }
+car_id peek_queue(car_queue* q){
+	if (q->count == 0){
+		return -1;
+	}else{
+		return q->car_ids[q->head];
+	}
+}
 boolean queue_empty(car_queue* q){
 	return (q->count == 0);
 }
@@ -210,7 +255,7 @@ void print_car_queue(car_queue* q){
 	for (int i=q->head;i<=max;i++){
 		printf("\tQueue index: %d\t", i);
 		print_car(q->car_ids[i]);
-		
+		printf("\n");
 		// if the queue circles around, have this loop also circle around
 		if (i == max && max != q->tail-1){
 			i=0;
@@ -222,8 +267,8 @@ void print_car_queue(car_queue* q){
 
 // INTERSECTION QUEUES
 car_queue approaching_queues[4]; // Cars line up on the roads to our intersection from the cardinal directions
-//emergency_vehicle_queues[4];	 // emergency vehicles line up in these special queues (representative of bypassing every car in the corresponding regular car queue)
-pthread_mutex_t cars_queues_lock_mutex[4]; // controls access to the respective car queues
+car_queue emergency_vehicle_queues[4];	 // emergency vehicles line up in these special queues (representative of bypassing every car in the corresponding regular car queue)
+semutex_t cars_queues_lock_mutex[4]; // controls access to the respective car queues
 
 /*void circularShift(boolean[4] a, int n){
 	for (int s=0;s<n;s++){
@@ -245,92 +290,146 @@ get_required_quadrants(car* c){
 	circularShift(*car.required_quadrants, (int)(car.direction-NORTH));
 }*/
 
-boolean can_cross(car* c){
+boolean can_cross(car_id id){
 	for (int i=0;i<3;i++){
-		if (c->required_quadrants[i] && quadrant_states[c->required_quadrants[i]]){ // If a car would need this quadrant to cross but the quadrant is occupied, then it cannot cross
+		if (cars[id].required_quadrants[i]==UNUSED){
+			break;
+		}
+		if (quadrant_states[cars[id].required_quadrants[i]]==OCCUPIED){ // If a car would need this quadrant to cross but the quadrant is occupied, then it cannot cross
 			return False;
 		}
 	}
 	return True;
 }
-void set_quadrant(quadrant_t quadrant, quadrant_state_t quad_state){
-	pthread_mutex_lock(&intersection_lock_mutex);
+
+/*void set_quadrant(quadrant_t quadrant, quadrant_state_t quad_state){
+	semutex_lock(&intersection_lock_mutex);
 	quadrant_states[quadrant] = quad_state;
-	pthread_mutex_unlock(&intersection_lock_mutex);
+	semutex_unlock(&intersection_lock_mutex);
 }
 void enter_quadrant(quadrant_t quad){
 	set_quadrant(quad, True);
 }
 void leave_quadrant(quadrant_t quad){
 	set_quadrant(quad, False);
-}
+}*/
 
 // CAR LOGIC
 #define this cars[id]
 void enqueue(car_id id){
-	pthread_mutex_lock(&cars_queues_lock_mutex[cars[id].direction]);
-	push_queue(&(approaching_queues[cars[id].direction]), id);
-	pthread_mutex_unlock(&cars_queues_lock_mutex[cars[id].direction]);
+	printf("\tCar %d is en-queueing in %s\n", id, str_direction(cars[id].direction));
+	semutex_lock(&cars_queues_lock_mutex[cars[id].direction]);
+	if (cars[id].type == REGULAR){
+		push_queue(&(approaching_queues[cars[id].direction]), id);
+	}else{
+		push_queue(&(emergency_vehicle_queues[cars[id].direction]), id);
+	}
+	semutex_unlock(&cars_queues_lock_mutex[cars[id].direction]);
 }
 
-void go(car* c){
+void go(car_id id){
+	printf("\t\t");
+	print_car(id);
+	printf(" is occupying quadrants ");
 	for (int i=0;i<3;i++){ // loop through the car's required quads
-		if (c->required_quadrants[i] != UNUSED){		// if we actually need this quadrant
-			enter_quadrant(c->required_quadrants[i]);	// enter
+		if (cars[id].required_quadrants[i] != UNUSED){		// if we actually need this quadrant
+			printf("%s,",str_quadrant(cars[id].required_quadrants[i]));
+			quadrant_states[cars[id].required_quadrants[i]] = OCCUPIED;
+			
+			/*enter_quadrant(c->required_quadrants[i]);	// enter
 			usleep(c->speed_time);						// spend some time there, enjoy the sun
 			leave_quadrant(c->required_quadrants[i]);	// move along
+			*/
 		}else{
 			break;
 		}
 	}
+	printf("\n");
 }
 
 // main car thread code
 void* car_procedure(void* void_id){
+	printf("\tCar %d created!\n", (int)void_id);
 	const car_id id = (car_id)void_id;
-	
 	while(1){
-		usleep(this.recycle_time); // sleep a bit
 		enqueue(id);			 // enqueue ourselves
-		
-		pthread_mutex_lock(&(this.mutex));				// lock our mutex
-		pthread_cond_wait(&(this.greenlight), &(this.mutex)); // wait to go
-		go(&this);			// go
-		recycle(&this);		// do it all again!
+		semutex_lock(&(this.mutex));				// wait to go
+		//pthread_cond_wait(&(this.greenlight), &(this.mutex)); // wait to go
+		usleep(INTERSECTION_CROSS_TIME);	//go(&this);			// go
+		recycle(this.id);		// do it all again!
+		usleep(this.recycle_time); // sleep a bit
 	}
 }
 
-pthread_mutex_t waiting_car_mutexes[4];
+approach_direction abs_quad(approach_direction base, int offset){
+	base+=offset;
+	while (base>=4){
+		base-=4;
+	}
+	return base;
+}
+#define dir abs_quad(cur_priority, d)
 void crossguard(){
 	//car* first_cars_in_line[4];
 	
+	approach_direction cur_priority = EAST;
 	while(1){
+		printf("\n\nCROSSGUARD prioritizing %s\n", str_direction(cur_priority));
 		
+		for (int d = 0;d<4;d++){
+			printf("\t Checking relative direction %d which is absolute direction %s\n", d, str_direction(dir));
+			if (!queue_empty(&(approaching_queues[dir]))){
+				car_id car = peek_queue(&(approaching_queues[dir]));
+				if (can_cross(car)){
+					car = pop_queue(&(approaching_queues[dir]));
+					printf("\t\tCar %d is Turning %s from direction %s\n", car, str_turn(cars[car].turn), str_direction(dir));
+					go(car);
+					semutex_unlock(&(cars[car].mutex)); // tell the car to go!
+				}else{
+					printf("\t\tCar can't cross.");
+				}
+			}else{
+				printf("\t\tNo car in queue %s\n", str_direction(dir));
+			}
+		}
+		
+		// circularly loop through direcitons
+		cur_priority++;
+		if (cur_priority >=4){
+			cur_priority=0;
+		}
+		
+		usleep(INTERSECTION_CROSS_TIME); // let cars go
+		
+		// clear the intersection for next time
+		for (int i=0;i<4;i++){
+			quadrant_states[i]=UNOCCUPIED;
+		}
 	}
 }
 
 void setup(){
 	for (int i=0;i<4;i++){
-		pthread_mutex_init(&cars_queues_lock_mutex[i], NULL);
+		semutex_init(&cars_queues_lock_mutex[i], False);
 	}
-	pthread_mutex_init(&intersection_lock_mutex, NULL);
+	semutex_init(&intersection_lock_mutex, False);
 	
 	for (int i=0;i<NUM_CARS;i++){
-		pthread_mutex_init(&(cars[i].mutex), NULL);
-		pthread_mutex_lock(&(cars[i].mutex));
-		pthread_cond_init(&(cars[i].greenlight), NULL);
+		semutex_init(&(cars[i].mutex), True);
+		//semutex_lock(&(cars[i].mutex));
+		//pthread_cond_init(&(cars[i].greenlight), NULL);
 	}
 }
 
 void teardown(){
 	for (int i=0;i<4;i++){
-		pthread_mutex_destroy(&cars_queues_lock_mutex[i]);
+		semutex_destroy(&cars_queues_lock_mutex[i]);
 	}
-	pthread_mutex_destroy(&intersection_lock_mutex);
+	semutex_destroy(&intersection_lock_mutex);
 
 	for (int i=0;i<NUM_CARS;i++){
-		pthread_mutex_destroy(&(cars[i].mutex));
-		pthread_cond_destroy(&(cars[i].greenlight));
+		semutex_destroy(&(cars[i].mutex));
+		//pthread_cond_destroy(&(cars[i].greenlight));
 	}
 }
 
@@ -341,12 +440,15 @@ int main(int argc, const char* argv[]){
 	int pthread_create_return_code;
 	for (car_id c=0;c<NUM_CARS;c++){
 		printf("\nMaking car %d\n", c);
-		recycle(&(cars[c])); 	// init the car
+		cars[c].id=c;
+		recycle(c); 	// init the car
 		pthread_create_return_code = pthread_create(&(cars[c].thread), NULL, car_procedure, (void*)(unsigned long)c);
 		if (pthread_create_return_code){
 			printf("ERROR; Return code from pthread_create is %d\n", pthread_create_return_code);
 		}
 	}
+	
+	usleep(2);
 	
 	crossguard();
 	
