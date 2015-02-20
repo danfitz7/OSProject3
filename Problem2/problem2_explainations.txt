@@ -1,64 +1,49 @@
-There are three security levels and corresponding security level numbers:
-0: No job (IDLE)
-1: Unclassified job (U)
-2: Secret job (S)
-3: Top Secret job (TS)
 
-We have several mutex-locked global variables to keep track of the state of the clusters and the jobs waiting to run on them:
-2 state variables representing the security level of the jobs running in each half of the cluser: cluster_A_level and cluster_B_level 
-3 variables for number of TS,S,U processes waiting to run, num_U, num_S, and num_TS
-2 condition variables used for broadcasting the availability of a cluster for a certain security level job: U_available, S_available (for S and TS availability)
-1 flag indicating if there were 3 TS jobs to run, and 1 was run, but another should still be run (even though num_TS is no longer >3) so that "if at least 3 TS jobs are ready to run, the cluster must ensure the first two TS jobs will be the next to run in the cluster": pending_TS
+PHASE 1:
+If the first vehicle that arrives at an intersction always gets to go before any vehicles that arrived later, then the intersection is behaving as one large First-In-First-Out (FIFO) queue.
+This is suboptimal because only one car is ever going at a time and because cars that arrive later can be starved out.
+For example, if 10 cars all arrive in quick succession from the north, then they will all get to go before any cars coming from any other direction get to go.
 
-When any job leaves a cluster half, we broadcast on the availability channel of the job running on the other cluster*
+PHASE 2:
+If vehicles proceed by only checking that the next immediate quadrant they need is currently free, deadlock can result whenever a car tries to turn left at the same time that a car to its right tries to go straight.
+For example, if a car is approaching from the South, it will check the SE quadrant, which is free, and enter the SE quadrant.
+At the same time, a car approaching from the West could check the NW quadrant, which is also free, and enter the NW quadrant.
+One of the two cars will check the NE quadrant (which they beth want to enter next), which is still free, and enter it.
+However, the other car is now stuck because it needed the NE quadrant, and the  car in the NE quadrant is stuck because it needs the other car to move out of the way.
+This type of deadlock can only be prevented if cars can predict what quadrants other cars will need (or "claim"/"lock" the quadrants they will soon enter) for their, and yield appropriately.
+This type of locking can be implemented with a mutex that locks a state variable or variables representing the occupancy of the quadrants.
+A car can lock this mutex, "claim" it's quadrants, and proceed, assured that no other car could have overwritten that claim. 
 
-We assume the pThreads scheduler under the hood is running every thread in pseudo-parallelism, unpredictably, but according to some specified protocol (Round-Robin).
-Our "virtual scheduling algorithm" arises from the threads checking when they can run their actual "government computation" (simulated by sleeping)
+PHASE 3:
+The queueing and dequeuing process must be different for emergency vehicles and motorcades.
+A complex enqueue function could be used that puts these vehicles at the front of the queue, instead of the back (like pushing on a stack)
+However, the solution used here is simply to let these special vehicles have their own queu, which always gets to go before vehicles in the regular queue.
+They effectively bypass regular vehicles.
+When a motorcade is encountered at an intersection, a loop is entered to allow all other vehicles approaching form the same direction to go until the queue is empty.
+Traffic then proceeds normally again.
 
-Every thread waits in what amounts to a TryLock blocking loop until the conditions of the above global state variables allow it to run it's computation:
+For our solution we have four queues, one for each approach direction.
+(As mentioned above, each of these is actually two queues, one for regular vehicles, and one for emergency vehicles that have passed them to get to the front of the line.)
+These is a "cross-guard" main scheduler that tells cars to "go". The cross-guard continually rotates, checking each direction in succession.
+When there is a car approaching from that direction (the queue(s) for that direction aren't empty), the guard checks if the first car in the queue can go.
+The guard knows what quadrants of the intersection have been "claimed" by the cars waiting there that it's looked at so far.
+It also knows what quadrants cars need to complete their different turns.
+If the guard sees no conflicts (none of the quadrants a car needs to turn have been claimed yet), it lets the car go, and turns its attention to the next approach direction.
+If there are emergency vehicles coming from nay direction (in any emergency queues), the cross-guard lets them go before anything else.
+It can let emergency vehicles go at the same time using the same above logic for quadrant occupancy.
+If a motorcade is encountered at any queue, the rest of that queue is emptied sequentially.
 
-TS_check_cluster(){
-	lock global variables
-	check  if either cluster is idle (no job)
-	flag success=0
-	if one is idle:
-		check compatibility with the job running in the other cluster (S, TS, or IDLE)
-		if compatible
-			set that clusters level to ours - we are going to be running in that cluster
-			if (num_TS==3){
-				pending_TS = TRUE
-			else if (pending_TS == TRUE){
-				pending_TS = FALSE
-			}
-			decrement the num_TS - one less TS process is waiting to run
-			success=1
-	unlock global variables
-	return success;
-}
+This solution meets the requirements because:
+-No two cars can be in the same portion of the intersection at the same time because they check what portions of the intersection they'll need, 
+and only go if no other cars that the crossguard has looked at fist has already claimed them.
 
-TS_run(){
-	while (!TS_check_cluster()
+-Drivers will not pass each other going the same way because drivers going the same way enter the intersection in a FIFO queue.
 
-	usleep()
-	
-	TS_exit()
-	
-	recycle()
-}
+-The cross-guard improves traffic flow without allowing traffic from any direction to starve traffic
+from any other direction by cycling through all directions, giving the next car from that direction "priority", but allowing any other cars to go that can.
 
-TS_exit(){
-	lock global vars
-	set this cluster's level to IDLE
-	unlock global vars
-	broadcast on the security level of the job of the other processor*
-}
-	
-	
-The other thread levels operate similarly, but with different compatibilities.
-The S and U jobs must also check if num_TS>2, to let TS jobs run if there are more than 2 of them.
+-The cross-guard maximize parallelism by allowing up to four cars to go at a time, if they don't need the same quadrants.
 
-*
-To ensure that TS and S jobs don't just keep swapping in and out we check if the number of U job in the queue is more then some threshold proportion larger than the number of T and TS jobs. 
-If it is, and there aren't more than 2 TS jobs waiting to run, then we don't broadcast when exiting, and when the job on the other cluster finishes, it broadcasts on the U level so that some U jobs can run.
-The reverse case happens for U jobs to allow T ans ST jobs to run.
-We don't have to worry about TS jobs waiting forever, since we've already built in mechanisms that force TS jobs to run when there are more than 2 of them.
+-Cars print their ID, Approach direction, Turning direction, and type when they enter/go, are recycled (leave), and enqueued (approach.)
+
+-The intersection maintains four-way radial symmetry.

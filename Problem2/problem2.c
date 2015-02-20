@@ -80,6 +80,38 @@ char* str_direction(approach_direction d){
 	}
 }
 
+// TYPE
+typedef enum {REGULAR, EMERGENCY, MOTORCADE} car_type_t;
+#define P_MOTORCADE 10
+#define P_EMERGENCY 10
+#define OUT_OF 100
+car_type_t random_type(){
+	int n=rand()%OUT_OF;
+	if (n<=P_MOTORCADE){
+		return EMERGENCY;
+	}else if (n<=(P_MOTORCADE+P_EMERGENCY)){
+		return MOTORCADE;
+	}else{
+		return REGULAR;
+	}
+}
+char* str_type(car_type_t t){
+	switch(t){
+		case REGULAR:
+			return "C";
+			break;
+		case EMERGENCY:
+			return "E";
+			break;
+		case MOTORCADE:
+			return "M";
+			break;
+		default:
+			return "?";
+			break;
+	}
+}
+
 // TIME
 typedef unsigned int time_ms;
 #define s_2_ms 1000000
@@ -187,7 +219,6 @@ void print_quadrant_list(quadrant_t quads[N_REQUIRED_QUADRANTS]){
 // CARS
 #define NUM_CARS 20
 typedef int car_id;
-typedef enum {REGULAR, EMERGENCY, MOTORCADE} car_type_t;
 typedef struct{
 	approach_direction direction;
 	turn_direction turn;
@@ -202,7 +233,7 @@ typedef struct{
 } car;
 car cars[NUM_CARS];	// master array of cars
 void print_car(car_id car){
-	printf("'%s%2d coming from %s turning %s'", ((cars[car].type==REGULAR)?"C":"E"), car, str_direction(cars[car].direction), str_turn(cars[car].turn));
+	printf("'%s%2d coming from %s turning %s'", str_type(cars[car].type), car, str_direction(cars[car].direction), str_turn(cars[car].turn));
 }
 void recycle(car_id id){
 	printf("\tCar %d is recycling to: ", id);
@@ -210,7 +241,7 @@ void recycle(car_id id){
 	cars[id].turn = random_turn();
 	cars[id].direction = random_direction();
 	cars[id].recycle_time = random_recycle_time();
-	cars[id].type = REGULAR; // TODO: make emergency vehcles
+	cars[id].type = random_type();
 	//cars[id].speed_time = random_speed_time();
 	get_quadrant_list(cars[id].required_quadrants, cars[id].direction, cars[id].turn);
 	
@@ -246,7 +277,7 @@ void push_queue(car_queue* q, car_id id){
 		printf("WARNING: queue full: %d!\n", q->count);
 	}
 	if (q->tail == q->head){
-		printf("WARNING: queue full or empty!");
+		printf("WARNING: queue full or empty!\n");
 	}
 	
 	q->count++;
@@ -275,7 +306,7 @@ car_id pop_queue(car_queue* q){
 	}
 	
 	if (q->tail == q->head){
-		printf("WARNING: queue full or empty!");
+		printf("WARNING: queue full or empty!\n");
 	}
 	
 	return result;
@@ -321,8 +352,8 @@ void print_car_queue(car_queue* q){
 }
 
 // INTERSECTION QUEUES
-car_queue approaching_queues[4]; // Cars line up on the roads to our intersection from the cardinal directions
-car_queue emergency_vehicle_queues[4];	 // emergency vehicles line up in these special queues (representative of bypassing every car in the corresponding regular car queue)
+car_queue car_approaching_queues[4]; // Cars line up on the roads to our intersection from the cardinal directions
+car_queue emergency_approaching_queues[4];	 // emergency vehicles line up in these special queues (representative of bypassing every car in the corresponding regular car queue)
 semutex_t cars_queues_lock_mutex[4]; // controls access to the respective car queues
 
 /*void circularShift(boolean[4] a, int n){
@@ -373,11 +404,11 @@ void leave_quadrant(quadrant_t quad){
 #define this cars[id]
 void enqueue(car_id id){
 	approach_direction dir = cars[id].direction;
-	car_queue* queue = &(approaching_queues[dir]);
+	car_queue* queue = (cars[id].type == REGULAR)? &(car_approaching_queues[dir]) : &(emergency_approaching_queues[dir]);
 	
 	printf("\tEn-queueing ");
 	print_car(id);
-	printf(" in %s: ", str_direction(dir));
+	printf(" in %s queue approaching from %s: ", str_direction(dir), ((cars[id].type == REGULAR)?"regular":"emergency"));
 		
 	semutex_lock(&cars_queues_lock_mutex[dir]);
 	if (cars[id].type == REGULAR){
@@ -446,16 +477,69 @@ void crossguard(){
 	
 	approach_direction cur_priority = EAST;
 	unsigned long loop = 0;
+	
 	while(1){
 		printf("\n\nCROSSGUARD %lu prioritizing cars approaching from the %s\n", loop, str_direction(cur_priority));
 		loop++;
 
+		//check emergency queues, starting with this priority direction
+		printf("\n\tEmergency queues\n");
+		for (int d=0;d<4;d++){
+			approach_direction abs_cur_dir = abs_quad(cur_priority, d);
+			printf("\tChecking relative approach direction #%d which is absolute direction %s\n", d,str_direction(abs_cur_dir));
+			car_queue* queue = &(emergency_approaching_queues[abs_cur_dir]);
+			
+			printf("\t\tApproach direction queue %s: ", str_direction(abs_cur_dir));
+			print_car_queue(queue);
+			printf("\n");
+			
+			if (!queue_empty(queue)){
+				car_id car = peek_queue(queue);
+				
+				printf("\t\tExamining vehicle: ");
+				print_car(car);
+				printf("\n");
+				
+				if(cars[car].type == MOTORCADE){
+					printf("MOTORCADE...\n");
+					
+					// let everyone in that queue go
+					while(!queue_empty(queue)){
+						car = pop_queue(queue);
+						go(car);
+						semutex_unlock(&(cars[car].mutex)); // tell the car to go!
+						usleep(INTERSECTION_CROSS_TIME); 	// wait for the car to go
+					}
+					// let normal cars from that direction go as well.
+					while(!queue_empty(car_approaching_queues[abs_cur_dir])){
+						car = pop_queue(car_approaching_queues[abs_cur_dir]);
+						go(car);
+						semutex_unlock(&(cars[car].mutex)); // tell the car to go!
+						usleep(INTERSECTION_CROSS_TIME); 	// wait for the car to go
+					}
+					printf("... DONE WITH MOTORCADE\n");
+				}else{
+				
+					// have the emergency car go no matter what
+					printf("EMERGENCY VEHICLE GOING!...\n");
+					car = pop_queue(queue);
+					printf("\t\t\tClearing intersection for emergency vehcile\n");
+					go(car);
+					semutex_unlock(&(cars[car].mutex)); // tell the car to go!
+					usleep(INTERSECTION_CROSS_TIME); 	// wait for the car to go
+					printf("...EMERGENCY VEHICLE DONE GOING!\n");
+				}
+			}
+		}
+		
+		// check regular queues, starting with this priority direction
+		printf("\n\tRegular queues\n");
 		for (int d = 0;d<4;d++){
 			approach_direction abs_cur_dir = abs_quad(cur_priority, d);
-			printf("\tChecking relative apprach direction #%d which is absolute direction %s\n", d,str_direction(abs_cur_dir));
-			car_queue* queue = &(approaching_queues[abs_cur_dir]);
+			printf("\tChecking relative approach direction #%d which is absolute direction %s\n", d,str_direction(abs_cur_dir));
+			car_queue* queue = &(car_approaching_queues[abs_cur_dir]);
 			
-			printf("\tChecking approach direction queue %s: ", str_direction(abs_cur_dir));
+			printf("\t\tApproach direction queue is %s: ", str_direction(abs_cur_dir));
 			print_car_queue(queue);
 			printf("\n");
 			
@@ -499,12 +583,12 @@ void crossguard(){
 void setup(){
 	//init Queues
 	for (int i=0;i<4;i++){
-		approaching_queues[i].head=0;
-		approaching_queues[i].tail=0;
-		approaching_queues[i].count=0;
-		emergency_vehicle_queues[i].head=0;
-		emergency_vehicle_queues[i].tail=0;
-		emergency_vehicle_queues[i].count=0;
+		car_approaching_queues[i].head=0;
+		car_approaching_queues[i].tail=0;
+		car_approaching_queues[i].count=0;
+		emergency_approaching_queues[i].head=0;
+		emergency_approaching_queues[i].tail=0;
+		emergency_approaching_queues[i].count=0;
 	}
 	
 	
