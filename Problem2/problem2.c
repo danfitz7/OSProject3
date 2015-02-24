@@ -511,8 +511,8 @@ void crossguard(){
 						usleep(INTERSECTION_CROSS_TIME); 	// wait for the car to go
 					}
 					// let normal cars from that direction go as well.
-					while(!queue_empty(car_approaching_queues[abs_cur_dir])){
-						car = pop_queue(car_approaching_queues[abs_cur_dir]);
+					while(!queue_empty(&(car_approaching_queues[abs_cur_dir]))){
+						car = pop_queue(&(car_approaching_queues[abs_cur_dir]));
 						go(car);
 						semutex_unlock(&(cars[car].mutex)); // tell the car to go!
 						usleep(INTERSECTION_CROSS_TIME); 	// wait for the car to go
